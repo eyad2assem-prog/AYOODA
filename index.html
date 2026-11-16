@@ -829,11 +829,7 @@ function addInvoiceLine(type) {
       </div>
       <div class="form-group">
         <label>الكمية</label>
-       quantity: parseFloat(
-  (line.querySelector(".inv-qty").value || "0")
-    .trim()
-    .replace(",", ".")
-),
+       quantity: Number(line.querySelector(".inv-qty").value),
       </div>
       <div class="form-group">
         <label>السعر للوحدة</label>
