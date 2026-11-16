@@ -829,7 +829,7 @@ function addInvoiceLine(type) {
       </div>
       <div class="form-group">
         <label>الكمية</label>
-       quantity: Number(line.querySelector(".inv-qty").value),
+        <input class="form-control inv-qty" type="number" min="1" step="1" value="1">
       </div>
       <div class="form-group">
         <label>السعر للوحدة</label>
@@ -907,32 +907,36 @@ function addInvoice(type) {
     </div>
     <div id="invoiceItems" style="margin-top:15px"></div>`,
 
+    // ===== عند الحفظ =====
     async form => {
       const lines = [...document.querySelectorAll("#invoiceItems .invoice-line")];
       if (!lines.length) throw new Error("أضف صنفًا واحدًا على الأقل");
 
-      const items = lines.map(line => {
-        const price = Number(line.querySelector(".inv-price").value);
+      const invoiceItems = lines.map(line => {
+        const quantity = Number(String(line.querySelector(".inv-qty")?.value ?? "").trim().replace(",", "."));
+        const price = Number(String(line.querySelector(".inv-price")?.value ?? "").trim().replace(",", "."));
+
         return {
-          product_id: line.querySelector(".inv-product").value,
-          unit_type: line.querySelector(".inv-unit").value,
-          quantity: Number(line.querySelector(".inv-qty").value),
+          product_id: line.querySelector(".inv-product")?.value,
+          unit_type: line.querySelector(".inv-unit")?.value,
+          quantity,
           ...(isSale ? { unit_price: price } : { unit_cost: price }),
           expiry_date: line.querySelector(".inv-expiry")?.value || null
         };
       });
 
-      for (const item of items) {
+      for (const item of invoiceItems) {
         const price = isSale ? item.unit_price : item.unit_cost;
-if (
-  !item.product_id ||
-  !Number.isFinite(item.quantity) ||
-  item.quantity <= 0 ||
-  !Number.isFinite(price) ||
-  price < 0
-) {
-  throw new Error("راجع بيانات الأصناف والكميات والأسعار");
-}
+
+        if (
+          !item.product_id ||
+          !["box", "carton"].includes(item.unit_type) ||
+          !Number.isFinite(item.quantity) || item.quantity <= 0 ||
+          !Number.isFinite(price) || price < 0
+        ) {
+          throw new Error("راجع الصنف والوحدة والكمية والسعر");
+        }
+
         if (!productById(item.product_id)) {
           throw new Error("أحد الأصناف المحددة غير موجود");
         }
@@ -944,14 +948,19 @@ if (
           p_party_id: form.get("party_id") || null,
           p_payment_method: form.get("payment_method"),
           p_notes: form.get("notes") || null,
-          p_items: items
+          p_items: invoiceItems
         }
       );
 
-      if (error) throw error;
+      if (error) {
+        console.error("Invoice Error:", error);
+        throw error;
+      }
+
       toast("تم حفظ الفاتورة بنجاح");
     },
 
+    // ===== بعد فتح النافذة =====
     () => {
       addInvoiceLine(type);
       $("#addInvoiceItem").addEventListener("click", () => addInvoiceLine(type));
