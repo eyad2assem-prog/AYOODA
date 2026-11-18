@@ -793,32 +793,119 @@ function renderInvoicesTable(type) {
 
   container.innerHTML = filtered.length ? `
     <div class="table-wrap"><table>
-      <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>الإجمالي</th><th>المدفوع</th><th>طريقة الدفع</th></tr></thead>
+      <thead><tr><th>رقم الفاتورة</th><th>التاريخ</th><th>الإجمالي</th><th>المدفوع</th><th>المتبقي</th><th>الحالة</th><th>طريقة الدفع</th><th>الإجراء</th></tr></thead>
       <tbody>
-        ${filtered.map(i => `
+        ${filtered.map(i => {
+          const remaining = Math.max(0, Number(i.remaining ?? (Number(i.total || 0) - Number(i.paid || 0))));
+          const status = i.payment_status || (remaining <= 0 ? "paid" : Number(i.paid || 0) > 0 ? "partial" : "unpaid");
+          const statusLabel = status === "paid" ? "مدفوعة" : status === "partial" ? "مدفوعة جزئيًا" : "غير مدفوعة";
+          const statusClass = status === "paid" ? "badge-success" : status === "partial" ? "badge-warning" : "badge-danger";
+          return `
           <tr>
             <td>${escapeHTML(i.invoice_no)}</td>
             <td>${dateFormat(i.created_at)}</td>
             <td>${money(i.total)}</td>
             <td>${money(i.paid)}</td>
+            <td>${money(remaining)}</td>
+            <td><span class="badge ${statusClass}">${statusLabel}</span></td>
             <td>${escapeHTML(PAYMENT_LABELS[i.payment_method] || i.payment_method || "—")}</td>
-          </tr>`).join("")}
+            <td><div class="row-actions">
+              <button type="button" class="btn btn-secondary btn-sm invoice-edit-btn" data-invoice-id="${escapeHTML(i.id)}">تعديل</button>
+              ${remaining > 0 ? `<button type="button" class="btn btn-primary btn-sm invoice-payment-btn" data-invoice-id="${escapeHTML(i.id)}">${type === "sale" ? "تحصيل دفعة" : "سداد دفعة"}</button>` : `<span class="muted">مكتملة</span>`}
+            </div></td>
+          </tr>`;
+        }).join("")}
       </tbody>
     </table></div>` : emptyState("🧾", "لا توجد فواتير");
+}
+
+function openInvoicePayment(type, invoiceId) {
+  const rows = type === "sale" ? state.sales : state.purchases;
+  const invoice = rows.find(item => String(item.id) === String(invoiceId));
+  if (!invoice) {
+    toast("لم يتم العثور على الفاتورة؛ حدّث الصفحة وحاول مرة أخرى", "error");
+    return;
+  }
+
+  const remaining = Math.max(0, Number(invoice.remaining ?? (Number(invoice.total || 0) - Number(invoice.paid || 0))));
+  if (remaining <= 0) {
+    toast("الفاتورة مسددة بالكامل", "error");
+    return;
+  }
+
+  openModal(
+    type === "sale" ? "تحصيل دفعة من العميل" : "سداد دفعة للمورد",
+    `
+      <div class="form-grid">
+        <div class="form-group full">
+          <label>رقم الفاتورة</label>
+          <input class="form-control" value="${escapeHTML(invoice.invoice_no || "")}" disabled>
+        </div>
+        <div class="form-group">
+          <label>إجمالي الفاتورة</label>
+          <input class="form-control" value="${escapeHTML(money(invoice.total))}" disabled>
+        </div>
+        <div class="form-group">
+          <label>المتبقي</label>
+          <input class="form-control" value="${escapeHTML(money(remaining))}" disabled>
+        </div>
+        <div class="form-group">
+          <label>مبلغ الدفعة *</label>
+          <input class="form-control" type="number" name="amount" min="0.01" max="${remaining}" step="0.01" required>
+        </div>
+        <div class="form-group">
+          <label>طريقة الدفع</label>
+          <input class="form-control" value="نقدي" disabled>
+        </div>
+        <div class="form-group full">
+          <label>ملاحظات</label>
+          <textarea class="form-control" name="notes" placeholder="ملاحظات اختيارية"></textarea>
+        </div>
+      </div>
+      <small class="muted">تُسجّل الدفعة النقدية في سجل المدفوعات والخزنة تلقائيًا.</small>`,
+    async form => {
+      const amount = Number(String(form.get("amount") || "").trim().replace(",", "."));
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error("أدخل مبلغ دفعة صحيحًا أكبر من صفر");
+      if (amount > remaining) throw new Error("مبلغ الدفعة أكبر من المتبقي في الفاتورة");
+
+      const { data, error } = await db.rpc("register_invoice_payment", {
+        p_invoice_type: type,
+        p_invoice_id: invoice.id,
+        p_amount: amount,
+        p_payment_method: "cash",
+        p_notes: form.get("notes") || null
+      });
+      if (error) throw error;
+      if (!data?.success) throw new Error("لم يتم تأكيد تسجيل الدفعة");
+
+      toast(type === "sale" ? "تم تحصيل الدفعة وتحديث الخزنة" : "تم تسجيل السداد وتحديث الخزنة");
+    }
+  );
 }
 
 function addInvoiceLine(type) {
   const isSale = type === "sale";
   const line = document.createElement("div");
   line.className = "invoice-line panel";
+  const productListId = `invoice-products-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
   line.innerHTML = `
     <div class="form-grid">
       <div class="form-group full">
-        <label>الصنف</label>
-        <select class="form-control inv-product">
+        <label>ابحث عن الصنف بالاسم أو الباركود</label>
+        <input class="form-control inv-product-search" type="search"
+          list="${productListId}"
+          placeholder="اكتب اسم الصنف أو امسح الباركود..." autocomplete="off">
+        <datalist id="${productListId}" class="inv-product-list">
+          ${state.products.map(p => {
+            const label = `${p.name || "صنف بدون اسم"}${p.bc ? ` — ${p.bc}` : ""}`;
+            return `<option value="${escapeHTML(label)}"></option>`;
+          }).join("")}
+        </datalist>
+        <select class="form-control inv-product" aria-hidden="true" tabindex="-1" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">
           <option value="">اختر الصنف</option>${optionsHTML(state.products)}
         </select>
+        <small class="muted inv-product-hint">اختر الصنف من الاقتراحات حتى يتم ربطه بالفاتورة.</small>
       </div>
       <div class="form-group">
         <label>نوع الوحدة</label>
@@ -848,8 +935,26 @@ function addInvoiceLine(type) {
   $("#invoiceItems").appendChild(line);
 
   const productSelect = line.querySelector(".inv-product");
+  const productSearch = line.querySelector(".inv-product-search");
   const unitSelect = line.querySelector(".inv-unit");
   const priceInput = line.querySelector(".inv-price");
+
+  function resolveSearchedProduct() {
+    const raw = productSearch.value.trim();
+    const normalized = raw.toLocaleLowerCase();
+    const product = state.products.find(p => {
+      const name = String(p.name || "").trim().toLocaleLowerCase();
+      const barcode = String(p.bc || "").trim().toLocaleLowerCase();
+      const display = `${p.name || "صنف بدون اسم"}${p.bc ? ` — ${p.bc}` : ""}`.toLocaleLowerCase();
+      return normalized && (normalized === name || normalized === barcode || normalized === display);
+    });
+
+    productSelect.value = product ? String(product.id) : "";
+    line.querySelector(".inv-product-hint").textContent = product
+      ? `تم اختيار: ${product.name}${product.bc ? ` — ${product.bc}` : ""}`
+      : "اختر الصنف من الاقتراحات حتى يتم ربطه بالفاتورة.";
+    updatePrice();
+  }
 
   function updatePrice() {
     const p = productById(productSelect.value);
@@ -861,6 +966,15 @@ function addInvoiceLine(type) {
       : (isCarton ? Number(p.carton_cost || 0) : boxCost(p));
   }
 
+  productSearch.addEventListener("input", resolveSearchedProduct);
+  productSearch.addEventListener("change", resolveSearchedProduct);
+  productSearch.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      resolveSearchedProduct();
+      if (!productSelect.value) toast("اختر صنفًا صحيحًا من قائمة الاقتراحات", "error");
+    }
+  });
   productSelect.addEventListener("change", updatePrice);
   unitSelect.addEventListener("change", updatePrice);
   line.querySelector(".remove-line").addEventListener("click", () => line.remove());
@@ -968,10 +1082,112 @@ function addInvoice(type) {
   );
 }
 
+async function editInvoice(type, invoiceId) {
+  const isSale = type === "sale";
+  const invoice = (isSale ? state.sales : state.purchases).find(x => String(x.id) === String(invoiceId));
+  if (!invoice) throw new Error("لم يتم العثور على الفاتورة؛ حدّث الصفحة وحاول مرة أخرى");
+
+  const table = isSale ? "sale_items" : "purchase_items";
+  const fk = isSale ? "sale_id" : "purchase_id";
+  const { data: oldLines, error } = await db.from(table).select("*").eq(fk, invoice.id).order("id");
+  if (error) throw error;
+  if (!oldLines?.length) throw new Error("لا توجد أصناف مرتبطة بهذه الفاتورة؛ لا يمكن تعديلها");
+
+  openModal(
+    isSale ? "تعديل فاتورة بيع" : "تعديل فاتورة شراء",
+    `
+    <div class="form-grid">
+      <div class="form-group full"><label>رقم الفاتورة</label><input class="form-control" value="${escapeHTML(invoice.invoice_no || "")}" disabled></div>
+      <div class="form-group"><label>${isSale ? "العميل" : "المورد"}</label>
+        <select class="form-control" name="party_id"><option value="">بدون تحديد</option>${optionsHTML(isSale ? state.customers : state.suppliers, invoice[isSale ? "customer_id" : "supplier_id"])}</select>
+      </div>
+      <div class="form-group"><label>طريقة الدفع</label>
+        <select class="form-control" name="payment_method">
+          <option value="cash" ${invoice.payment_method === "cash" ? "selected" : ""}>نقدي</option>
+          <option value="card" ${invoice.payment_method === "card" ? "selected" : ""}>بطاقة</option>
+          <option value="transfer" ${invoice.payment_method === "transfer" ? "selected" : ""}>تحويل</option>
+        </select>
+      </div>
+      <div class="form-group"><label>الخصم</label><input class="form-control" name="discount" type="number" min="0" step="0.01" value="${Number(invoice.discount || 0)}"></div>
+      <div class="form-group"><label>المدفوع (للقراءة فقط)</label><input class="form-control" value="${escapeHTML(money(invoice.paid || 0))}" disabled></div>
+      <div class="form-group full"><label>ملاحظات</label><textarea class="form-control" name="notes">${escapeHTML(invoice.notes || "")}</textarea></div>
+    </div>
+    <hr style="margin:20px 0;border-color:var(--border)">
+    <div style="display:flex;justify-content:space-between;align-items:center"><strong>أصناف الفاتورة</strong><button type="button" class="btn btn-secondary" id="addInvoiceItem">+ إضافة صنف</button></div>
+    <div id="invoiceItems" style="margin-top:15px"></div>
+    <small class="muted">سيتم الحفاظ على سجل المدفوعات. لا يمكن خفض إجمالي الفاتورة عن المبلغ المدفوع.</small>`,
+    async form => {
+      const lines = [...document.querySelectorAll("#invoiceItems .invoice-line")];
+      if (!lines.length) throw new Error("يجب أن تحتوي الفاتورة على صنف واحد على الأقل");
+      const invoiceItems = lines.map(line => {
+        const quantity = Number(String(line.querySelector(".inv-qty")?.value ?? "").trim().replace(",", "."));
+        const price = Number(String(line.querySelector(".inv-price")?.value ?? "").trim().replace(",", "."));
+        return {
+          ...(type === "purchase" && line.dataset.purchaseItemId ? { purchase_item_id: line.dataset.purchaseItemId } : {}),
+          product_id: line.querySelector(".inv-product")?.value,
+          unit_type: line.querySelector(".inv-unit")?.value,
+          quantity,
+          ...(isSale ? { unit_price: price } : { unit_cost: price }),
+          expiry_date: line.querySelector(".inv-expiry")?.value || null
+        };
+      });
+      for (const item of invoiceItems) {
+        const price = isSale ? item.unit_price : item.unit_cost;
+        if (!item.product_id || !["box", "carton"].includes(item.unit_type) || !Number.isFinite(item.quantity) || item.quantity <= 0 || !Number.isFinite(price) || price < 0) {
+          throw new Error("راجع الصنف والوحدة والكمية والسعر في كل سطر");
+        }
+        if (!productById(item.product_id)) throw new Error("أحد الأصناف المحددة غير موجود");
+      }
+      const discount = Number(String(form.get("discount") || "0").trim().replace(",", "."));
+      if (!Number.isFinite(discount) || discount < 0) throw new Error("قيمة الخصم غير صحيحة");
+      const { data, error: rpcError } = await db.rpc(isSale ? "update_sale_invoice" : "update_purchase_invoice", {
+        [isSale ? "p_sale_id" : "p_purchase_id"]: invoice.id,
+        p_items: invoiceItems,
+        p_notes: form.get("notes") || null,
+        p_party_id: form.get("party_id") || null,
+        p_payment_method: form.get("payment_method"),
+        p_discount: discount
+      });
+      if (rpcError) throw rpcError;
+      if (!data?.success) throw new Error("لم يتم تأكيد تعديل الفاتورة");
+      toast("تم تعديل الفاتورة بنجاح");
+    },
+    () => {
+      oldLines.forEach(old => {
+        addInvoiceLine(type);
+        const line = document.querySelector("#invoiceItems .invoice-line:last-child");
+        const product = productById(old.product_id);
+        if (!line || !product) throw new Error("تعذر تحميل أحد أصناف الفاتورة");
+        const search = line.querySelector(".inv-product-search");
+        search.value = `${product.name || "صنف بدون اسم"}${product.bc ? ` — ${product.bc}` : ""}`;
+        search.dispatchEvent(new Event("change", { bubbles: true }));
+        line.querySelector(".inv-product").value = String(old.product_id);
+        line.querySelector(".inv-unit").value = old.unit_type;
+        line.querySelector(".inv-qty").value = old.quantity;
+        line.querySelector(".inv-price").value = isSale ? old.unit_price : old.unit_cost;
+        if (!isSale) {
+          line.querySelector(".inv-expiry").value = state.batches.find(b => String(b.id) === String(old.batch_id))?.expiry_date || "";
+          line.dataset.purchaseItemId = old.id;
+        }
+      });
+      $("#addInvoiceItem").addEventListener("click", () => addInvoiceLine(type));
+    }
+  );
+}
+
 function setupInvoicesPage(type) {
   $("#main").innerHTML = invoicesPage(type);
   $("#addInvoiceBtn").addEventListener("click", () => addInvoice(type));
   $("#invoiceSearch").addEventListener("input", () => renderInvoicesTable(type));
+  $("#invoicesTable").addEventListener("click", event => {
+    const editButton = event.target.closest(".invoice-edit-btn");
+    if (editButton) {
+      editInvoice(type, editButton.dataset.invoiceId).catch(showError);
+      return;
+    }
+    const button = event.target.closest(".invoice-payment-btn");
+    if (button) openInvoicePayment(type, button.dataset.invoiceId);
+  });
   $("#exportInvoices").addEventListener("click", () =>
     exportCSV(type === "sale" ? "sales.csv" : "purchases.csv", type === "sale" ? state.sales : state.purchases)
   );
